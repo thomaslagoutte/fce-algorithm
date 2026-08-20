@@ -70,3 +70,12 @@
   test case used `coefficient=1.0`, so both gaps were latent, not merely
   undocumented. Both are now enforced/fixed in code, with regression tests for the
   rejection and the fix. Checklist items re-verified and still pass.
+- 2026-08-20 revision 5 (test-design hardening, prompted during Spec 2's second
+  clarification session): the three non-unit-coefficient regression values added in
+  revision 4 (`0.5, 3.0, -0.5`) included an integer (`3.0`) and two simple fractions
+  of the period-2 domain — checked computationally and confirmed they do catch the
+  specific pre-fix bug, but replaced with `0.37, 4.13, -1.79` anyway as the more
+  robust test design: incommensurate values rule out masking via *any* coincidental
+  rational relationship to the domain, not just the one bug already found. SC-011's
+  wording updated to state this explicitly. Checklist items re-verified and still
+  pass.
