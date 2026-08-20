@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fourierlearn"
+version = "0.1.0"
+description = "Shot-based implementation of Barthe's Fourier Coefficient Extraction algorithm"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "qiskit==2.3.1",
+    "qiskit-aer==0.17.2",
+    "numpy==1.26.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "mypy",
+    "packaging",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fourierlearn"]
+
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_defs = true
+disallow_any_generics = true
+files = ["src/fourierlearn"]
+
+[[tool.mypy.overrides]]
+module = "qiskit.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
