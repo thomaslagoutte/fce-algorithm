@@ -45,6 +45,13 @@ class PauliTerm:
     `pauli`, `parameter_index`, `coefficient`, and `tie_group` are this layer's own
     bookkeeping — Qiskit has no native concept of any of them. `to_gate()` is where
     this term becomes a real Qiskit gate, rather than this class reimplementing one.
+
+    **Audit finding (2026-08-20, spec FR-007 amendment)**: `coefficient` MUST be
+    nonzero and MUST be the same value across every `PauliTerm` sharing a
+    `parameter_index` (checked at `PauliEncodedCircuitIR` construction, not here —
+    it is a cross-term constraint). The reference oracle rescales its grid domain by
+    `1/coefficient` per parameter (FR-022); a heterogeneous or zero coefficient has
+    no well-defined rescaling and silently aliases the extracted spectrum otherwise.
     """
 
     pauli: str  # e.g. "XZ" — one Pauli letter per entry in `qubits`.

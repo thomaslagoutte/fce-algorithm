@@ -29,13 +29,19 @@ def _single_upload_ir() -> PauliEncodedCircuitIR:
     )
 
 
-def _tied_ir(coefficients: tuple[float, float] = (1.0, 1.0)) -> PauliEncodedCircuitIR:
-    """r_j=2: two Pauli strings sharing parameter_index=0 in one tie_group."""
+def _tied_ir(coefficient: float = 1.0) -> PauliEncodedCircuitIR:
+    """r_j=2: two Pauli strings sharing parameter_index=0 in one tie_group.
+
+    Both terms MUST share the exact same coefficient (audit finding, 2026-08-20):
+    the oracle rescales its grid domain by 1/coefficient per parameter, so
+    heterogeneous coefficients within one parameter have no single rescaling that
+    resolves them onto the integer frequency lattice — see
+    test_heterogeneous_coefficient_within_tie_group_is_rejected below."""
     return PauliEncodedCircuitIR(
         num_qubits=1,
         gates=(
-            PauliTerm("Z", (0,), parameter_index=0, coefficient=coefficients[0], tie_group=0),
-            PauliTerm("X", (0,), parameter_index=0, coefficient=coefficients[1], tie_group=0),
+            PauliTerm("Z", (0,), parameter_index=0, coefficient=coefficient, tie_group=0),
+            PauliTerm("X", (0,), parameter_index=0, coefficient=coefficient, tie_group=0),
         ),
         observable=SparsePauliOp("Z"),
     )
@@ -45,10 +51,49 @@ def _tied_ir(coefficients: tuple[float, float] = (1.0, 1.0)) -> PauliEncodedCirc
 
 
 def test_tied_parameter_round_trips_upload_count_multiplicity_coefficients() -> None:
-    ir = _tied_ir(coefficients=(1.5, 2.5))
+    ir = _tied_ir(coefficient=2.5)
     assert ir.upload_count(0) == 1
     assert ir.multiplicity(0) == 2
-    assert ir.coefficients(0) == (1.5, 2.5)
+    assert ir.coefficients(0) == (2.5, 2.5)
+
+
+def test_heterogeneous_coefficient_within_tie_group_is_rejected() -> None:
+    """Audit finding (2026-08-20): terms tied to one parameter — within one
+    tie_group or across repeated uploads — MUST share the exact same coefficient.
+    The oracle's grid domain is rescaled by 1/coefficient per parameter; a
+    heterogeneous tie group has no single rescaling that avoids aliasing (verified
+    numerically: an incommensurate pair leaks a dense, non-integer spectrum across
+    the entire grid rather than concentrating on the assumed lattice)."""
+    with pytest.raises(ValueError):
+        PauliEncodedCircuitIR(
+            num_qubits=2,
+            gates=(
+                PauliTerm("Z", (0,), parameter_index=0, coefficient=1.0, tie_group=0),
+                PauliTerm("Z", (1,), parameter_index=0, coefficient=0.3, tie_group=0),
+            ),
+            observable=SparsePauliOp("XX"),
+        )
+
+
+def test_heterogeneous_coefficient_across_uploads_is_rejected() -> None:
+    """Same requirement as above, but for two separate (untied) uploads of one
+    parameter with different coefficients — also rejected, since a single
+    coefficient must cover every term of that parameter, not just each tie_group
+    individually."""
+    with pytest.raises(ValueError):
+        PauliEncodedCircuitIR(
+            num_qubits=1,
+            gates=(
+                PauliTerm("Z", (0,), parameter_index=0, coefficient=1.0, tie_group=0),
+                PauliTerm("Z", (0,), parameter_index=0, coefficient=2.0, tie_group=1),
+            ),
+            observable=SparsePauliOp("Z"),
+        )
+
+
+def test_zero_coefficient_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        PauliTerm("Z", (0,), parameter_index=0, coefficient=0.0, tie_group=0)
 
 
 def test_untied_multi_upload_reports_correct_upload_count_and_multiplicity() -> None:
@@ -142,8 +187,8 @@ def test_parameter_symbols_one_per_distinct_index() -> None:
 
 
 def test_coefficient_does_not_affect_upload_count_multiplicity_or_grid_shape() -> None:
-    ir_a = _tied_ir(coefficients=(1.0, 1.0))
-    ir_b = _tied_ir(coefficients=(0.37, -12.9))  # only coefficients differ
+    ir_a = _tied_ir(coefficient=1.0)
+    ir_b = _tied_ir(coefficient=-12.9)  # only the (uniform) coefficient differs
 
     assert ir_a.upload_count(0) == ir_b.upload_count(0)
     assert ir_a.multiplicity(0) == ir_b.multiplicity(0)

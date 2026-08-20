@@ -263,12 +263,33 @@ evaluation would introduce a synthesis dependency with no accuracy benefit.
 
 ---
 
-## R7. Nyquist grid construction and FFT normalization (FR-011, FR-020)
+## R7. Nyquist grid construction and FFT normalization (FR-011, FR-020, FR-022)
 
 **Decision**: Per parameter `j`, the grid has `N_j = 4 r_j L_j + 1` points (pre-parity,
 per spec FR-011/Assumptions and directly sourced in R12 from the Z2LGT report §5.3),
-evenly spaced over the **full** period-2 domain (e.g. `α_j ∈ [0, 2)`), now
-definitively resolved to be period **2**, not `2π` (see R8). The oracle evaluates `f`
+evenly spaced over the **full** period-`2/coefficient` domain (e.g. `α_j ∈ [0, 2/c)`),
+now definitively resolved to be period **2** in `coefficient·α` — not `2π`, and not a
+domain of fixed length 2 regardless of `coefficient` (see R8, and the correction
+below).
+
+**Correction (2026-08-20 audit, ahead of Spec 2): the domain must be rescaled by
+`1/coefficient`, not fixed at length 2.** The original version of this decision
+sampled a fixed `α ∈ [0, 2)` domain unconditionally. That is only correct when
+`coefficient = 1` for every term of the parameter — `to_gate()` applies the physical
+rotation angle `-π·coefficient·α` (R3, R6), so the circuit's true periodicity in `α`
+is `2/coefficient`, not `2`. Verified numerically: `coefficient=0.37` on a single,
+untied term (no tying involved at all) already produced results disagreeing with an
+independent, much finer (`N=2001`) reference computation of the same circuit — the
+fixed-domain grid was silently aliasing. Rescaling the sampled domain to
+`2/coefficient` (same point count `N_j`) was confirmed, for both a positive and a
+negative coefficient, to reproduce exactly the `coefficient=1` answer at the same
+raw integer `l`. This is what makes `coefficient` usable as a genuine physical scale
+(§6.4's "Trotter-step" example) rather than merely documented but broken for any
+value besides 1 — required for Spec 2's Trotter frontend, whose coefficients
+(`c_k = -h_k/(πL)`) are essentially never 1. `PauliEncodedCircuitIR` now requires
+`coefficient` to be uniform (and nonzero) across every term of one parameter
+(FR-007 amendment) precisely because this rescaling is per-parameter, not per-term —
+a heterogeneous parameter has no single rescaling that avoids aliasing. The oracle evaluates `f`
 on the full outer-product grid (`numpy.meshgrid` / direct nested evaluation), applies
 `numpy.fft.fftn` over all `d` axes at once, and divides by the total point count
 `prod(N_j)` to convert the raw DFT sum into Fourier series coefficients, then reads

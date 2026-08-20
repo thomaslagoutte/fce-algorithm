@@ -59,3 +59,14 @@
   test). Both trace to a review of plan.md's design, not the spec's own gaps, but are
   recorded here since they add falsifiable requirements a complete spec needs.
   Checklist items re-verified and still pass.
+- 2026-08-20 revision 4 (post-implementation audit, ahead of Spec 2): a rigorous
+  architectural audit — prompted by a question about whether tied Pauli terms may
+  have heterogeneous coefficients — found two related, previously-unvalidated
+  defects, both already implemented and tested: (1) `PauliEncodedCircuitIR` did not
+  require `coefficient` uniformity across a parameter's terms (FR-007 amended,
+  SC-010 added); (2) the oracle sampled a fixed length-2 domain regardless of
+  `coefficient`, silently aliasing any non-unit value — confirmed against an
+  independent, finer-grid ground truth (FR-022 added, SC-011 added). Every prior
+  test case used `coefficient=1.0`, so both gaps were latent, not merely
+  undocumented. Both are now enforced/fixed in code, with regression tests for the
+  rejection and the fix. Checklist items re-verified and still pass.

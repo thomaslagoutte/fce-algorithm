@@ -114,3 +114,45 @@ def test_two_upload_coefficient_is_genuinely_complex_not_degenerate() -> None:
 
 def test_two_upload_odd_l_vanish() -> None:
     _assert_odd_l_vanish(coefficients(_two_upload_ir()))
+
+
+# --- Audit finding (2026-08-20): non-unit uniform coefficient regression ---------
+
+
+@pytest.mark.parametrize("coefficient", [0.37, 4.13, -1.79])
+def test_non_unit_uniform_coefficient_reproduces_the_same_raw_l_spectrum(
+    coefficient: float,
+) -> None:
+    """The oracle rescales its grid domain by 1/coefficient per parameter (audit
+    finding: a fixed-length domain silently aliases any non-unit coefficient — the
+    bug was confirmed against an independent fine-grid ground truth before this
+    fix). The extracted integer `l` is conjugate to `coefficient*alpha`, not to
+    `alpha` itself, so it MUST reproduce the exact same raw-l coefficients as the
+    coefficient=1.0 case, regardless of the coefficient's actual value or sign —
+    this is what makes `coefficient` usable as a Trotter-style physical scale
+    (Constitution §6.4) rather than corrupting the extraction.
+
+    The parametrized values are deliberately non-integer and not simple fractions
+    of the period-2 domain (not 0.5, not an integer like 2 or 3): a value like
+    `coefficient=2` makes the rescaled domain `2/coefficient=1`, a simple rational
+    relationship to the original length-2 domain, under which a *different*,
+    still-incorrect rescaling could coincidentally agree with the correct one and
+    mask a defect. Verified in-session that the specific pre-fix bug (a fixed
+    length-2 domain regardless of coefficient) is in fact caught by simpler values
+    too, but incommensurate values (0.37, 4.13, -1.79) are the more robust choice
+    against other plausible-but-wrong rescalings, not just the one bug already
+    found."""
+    ir = PauliEncodedCircuitIR(
+        num_qubits=1,
+        gates=(
+            FixedGate(HGate(), (0,)),
+            PauliTerm("Z", (0,), parameter_index=0, coefficient=coefficient, tie_group=0),
+        ),
+        observable=SparsePauliOp("X"),
+    )
+    result = coefficients(ir)
+    _assert_close(result[(2,)], 0.5 + 0j)
+    _assert_close(result[(-2,)], 0.5 + 0j)
+    for (l,), value in result.items():
+        if l not in (2, -2):
+            _assert_close(value, 0j)

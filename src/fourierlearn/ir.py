@@ -46,6 +46,13 @@ class PauliTerm:
             )
         if len(set(self.qubits)) != len(self.qubits):
             raise ValueError(f"PauliTerm.qubits must be distinct, got {self.qubits}")
+        if self.coefficient == 0:
+            raise ValueError(
+                "PauliTerm.coefficient must not be exactly 0 — the oracle's grid "
+                "domain is rescaled by 1/coefficient per parameter (§6.4); a zero "
+                "coefficient has no well-defined period and would divide by zero, "
+                "rather than silently representing 'this parameter has no effect'"
+            )
         if not set(self.pauli) <= _VALID_PAULI_LETTERS:
             raise ValueError(f"PauliTerm.pauli letters must be in I/X/Y/Z, got {self.pauli!r}")
 
@@ -144,14 +151,27 @@ class PauliEncodedCircuitIR:
         return groups
 
     def _validate_tying(self) -> None:
-        for parameter_index in self._terms_by_index():
+        for parameter_index, terms in self._terms_by_index().items():
             groups = self._tie_groups(parameter_index)
-            sizes = {len(terms) for terms in groups.values()}
+            sizes = {len(g) for g in groups.values()}
             if len(sizes) != 1:
                 raise ValueError(
                     f"parameter_index {parameter_index} has inconsistent tie-group "
                     f"sizes {sorted(sizes)} — multiplicity r_j must be uniform "
                     "across every tie_group for one parameter (§11.2, §6.3)"
+                )
+            coefficient_values = {term.coefficient for term in terms}
+            if len(coefficient_values) != 1:
+                raise ValueError(
+                    f"parameter_index {parameter_index} has non-uniform "
+                    f"coefficients {sorted(coefficient_values)} across its tied "
+                    "and/or repeated terms. Every PauliTerm sharing a "
+                    "parameter_index MUST use the exact same coefficient: the "
+                    "oracle rescales its Nyquist grid domain by 1/coefficient for "
+                    "that parameter (§6.4), and heterogeneous coefficients have no "
+                    "single rescaling that resolves them onto the integer "
+                    "frequency lattice — verified in-session to alias silently "
+                    "otherwise, not merely to be unsupported."
                 )
 
     def parameters(self) -> tuple[Parameter, ...]:

@@ -71,14 +71,29 @@ def _check_budget(circuit: PauliEncodedCircuitIR, budget: int, confirm: bool) ->
 
 def _build_grid(circuit: PauliEncodedCircuitIR) -> list[npt.NDArray[np.float64]]:
     """Per parameter (in coordinate_order), the `4*r_j*L_j+1`-point grid over the
-    FULL period-2 domain — not the period-1 half-domain the parity result would, in
-    principle, justify (FR-020): sampling only the half-domain would make every
-    odd-l coefficient structurally unobservable, baking the parity claim in as an
-    assumption rather than a checked property."""
+    FULL period-`2/coefficient` domain — not the period-1 half-domain the parity
+    result would, in principle, justify (FR-020): sampling only the half-domain
+    would make every odd-l coefficient structurally unobservable, baking the parity
+    claim in as an assumption rather than a checked property.
+
+    The domain length is `2/coefficient`, not a fixed `2` (audit finding, 2026-08-20):
+    `to_gate()` applies the physical rotation angle `-pi*coefficient*alpha`, so the
+    circuit's true periodicity in `alpha` is `2/coefficient`, not `2`. Sampling a
+    fixed length-2 domain regardless of `coefficient` silently aliases the extracted
+    spectrum for any non-unit coefficient — confirmed numerically in-session
+    (coefficient=0.37 on a single, untied term already reproduces a wrong result
+    against an independent fine-grid ground truth). The IR's own construction-time
+    validation (`PauliEncodedCircuitIR._validate_tying`) guarantees `coefficient` is
+    uniform across every term of one parameter, so this rescaling is well-defined
+    per parameter; the extracted integer `l` is then conjugate to `coefficient*alpha`,
+    not to `alpha` itself — physical frequency is `coefficient * l` (§6.4's "physical
+    frequency is reconstructed in the interpretation layer")."""
     axes = []
     for p in circuit.parameters():
         n_points = 4 * p.multiplicity * p.upload_count + 1
-        axes.append(np.array([2 * m / n_points for m in range(n_points)]))
+        (coefficient,) = set(p.coefficients)  # uniform by construction (ir.py)
+        domain_length = 2 / coefficient
+        axes.append(np.array([domain_length * m / n_points for m in range(n_points)]))
     return axes
 
 

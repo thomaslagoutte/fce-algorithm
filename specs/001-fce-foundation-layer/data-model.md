@@ -18,7 +18,7 @@ test, deferred to Spec 3, will probe).
 | `index` | `int` | The parameter's position, `j`, in coordinate order (§ frequency.coordinate_order). |
 | `upload_count` | `int` (`L_j`, ≥ 1) | Number of times this parameter's tied Pauli-rotation block is applied (e.g. Trotter steps). |
 | `multiplicity` | `int` (`r_j`, ≥ 1) | Number of Pauli strings tied to this one parameter index within a single application of its block (§11.2). |
-| `coefficients` | `tuple[float, ...]` | One real coefficient `c` per `PauliTerm` tied to this parameter, in gate order — length `upload_count * multiplicity`. |
+| `coefficients` | `tuple[float, ...]` | One real coefficient `c` per `PauliTerm` tied to this parameter, in gate order — length `upload_count * multiplicity`. **Audit finding (2026-08-20): every entry is the same value** — see below. |
 
 **Validation rules**:
 - `upload_count = (# PauliTerm with this index) / multiplicity`; constructing a
@@ -29,6 +29,15 @@ test, deferred to Spec 3, will probe).
   simultaneously-applied `PauliTerm`s sharing that index (§11.2 — one parameter, one
   multiplicity; a design where tied strings could carry different multiplicities is
   rejected by construction, not merely by convention).
+- **`coefficient` MUST be the same value across every `PauliTerm` sharing that
+  index** (within one tie_group and across every repeated upload) — audit finding,
+  2026-08-20 (spec FR-007 amendment): the reference oracle rescales its grid domain
+  by `1/coefficient` per parameter (FR-022); a parameter whose terms disagree on
+  `coefficient` has no single rescaling that avoids aliasing. This was not
+  originally validated — every Spec 1 test case used `coefficient=1.0`, so the gap
+  went unexercised until audited ahead of Spec 2 (Encodings layer), whose Trotter
+  frontend's coefficients are essentially never 1. A `coefficient` of exactly zero
+  is also rejected (no well-defined period to rescale by).
 
 ---
 
@@ -130,7 +139,10 @@ guaranteed-consistent instance rather than re-validating):
   check is verified against the installed Qiskit API at implementation time, per
   §9.7).
 - The `Parameter` consistency rules above (upload count divides evenly, multiplicity
-  uniform per index).
+  uniform per index, **coefficient uniform per index** — audit finding, 2026-08-20).
+- `PauliTerm.coefficient != 0` (checked in `PauliTerm.__post_init__`, not here — a
+  zero coefficient has no well-defined period for the oracle's `1/coefficient`
+  domain rescaling, FR-022).
 
 ---
 

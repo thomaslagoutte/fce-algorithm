@@ -218,7 +218,16 @@ build, then removing the import and verifying the check passes.
   parameters (§9.3).
 - **FR-007**: The IR MUST NOT fold any per-parameter scaling factor (e.g. a Trotter
   step) into the frequency register it carries; the register counts integers only
-  (§6.4).
+  (§6.4). **Amendment (2026-08-20 audit)**: every `PauliTerm` sharing one
+  `parameter_index` — within one tie_group and across every repeated upload of that
+  parameter — MUST carry the exact same `coefficient` value, and construction MUST
+  reject a heterogeneous case rather than silently accepting it. This was not
+  originally validated; audit found that the oracle's grid domain must be rescaled
+  by `1/coefficient` per parameter (FR-022) for that scaling factor to be usable at
+  all, and no single rescaling resolves a parameter whose terms disagree on
+  `coefficient` — verified numerically to alias silently otherwise, not merely to be
+  unsupported. A `coefficient` of exactly zero is rejected for the same reason (no
+  well-defined period to rescale by).
 - **FR-008**: A single frequency-convention module MUST be the sole source of truth for
   frequency sign, pre-/post-parity indexing, two's-complement decoding, and coordinate
   ordering (§6.1), pinned as follows:
@@ -294,6 +303,17 @@ build, then removing the import and verifying the check passes.
   returned frequency (`l ↔ -l`) and is invisible on any real-coefficient test —
   including FR-016's single-upload case — so it can only be caught structurally, not
   by inspection of a real-valued result.
+- **FR-022** (added 2026-08-20 audit): The reference oracle's Nyquist grid domain
+  for each parameter MUST be rescaled by `1/coefficient` — length `2/coefficient`,
+  not a fixed length `2` — using that parameter's uniform coefficient (FR-007). A
+  fixed-length domain is only correct when `coefficient = 1`; for any other value it
+  silently aliases the extracted spectrum, verified by comparing the oracle's output
+  against an independent, much finer reference grid for a non-unit coefficient
+  before this requirement was written. The extracted integer `l` remains conjugate
+  to `coefficient * α`, not to `α` itself; physical frequency is `coefficient * l`,
+  reconstructed downstream (§6.4's "physical frequency is reconstructed in the
+  interpretation layer" — this FR is what makes that reconstruction valid rather
+  than aspirational).
 
 ### Key Entities *(include if feature involves data)*
 
@@ -311,7 +331,9 @@ build, then removing the import and verifying the check passes.
   circuit to its Fourier coefficients via Nyquist-grid evaluation and d-dimensional FFT.
   Ground truth for every other layer's validation; never imported by production code.
   Samples the full pre-parity domain so the parity result is a live check, not a
-  baked-in premise (FR-020).
+  baked-in premise (FR-020). Rescales that domain by `1/coefficient` per parameter
+  so any (uniform) coefficient value extracts correctly, not only `coefficient = 1`
+  (FR-022, added 2026-08-20 audit).
 - **CI import guard**: The build check that inspects production modules for forbidden
   imports (`Statevector`, `Operator`, `expm`, the reference oracle) and fails the build
   if any are found outside their permitted scope.
@@ -356,6 +378,19 @@ build, then removing the import and verifying the check passes.
   `Z`-upload, is `Operator`-equivalent to a hand-built rotation gate at the angle the
   `e^{iπcαP}` encoding convention implies (`t = -π c α`); flipping the sign in the
   mapping fails this test (FR-021).
+- **SC-010** (added 2026-08-20 audit): Construction of a `PauliEncodedCircuitIR`
+  with heterogeneous `coefficient` values across terms sharing one `parameter_index`
+  — whether within one tie_group or across separate uploads — raises, verified by a
+  dedicated test for each case (FR-007).
+- **SC-011** (added 2026-08-20 audit): The oracle reproduces the identical raw-`l`
+  coefficients for a single-upload test case regardless of that parameter's
+  (uniform, nonzero) coefficient value or sign — verified for at least three
+  distinct, non-integer coefficient values with no simple rational relationship to
+  the period-2 domain (not `0.5`, not an integer like `2` or `3`), including a
+  negative one, so the check cannot be masked by a different, still-incorrect
+  rescaling that happens to coincide with the correct one at a "nice" value —
+  confirming the grid's `1/coefficient` domain rescaling (FR-022) rather than
+  assuming it from the coefficient=1 case alone.
 
 ## Assumptions
 
@@ -368,11 +403,22 @@ build, then removing the import and verifying the check passes.
   independent parameter indices after tying (i.e. the number of distinct parameters once
   multiplicity is accounted for) — a count, not a parity annotation. Per-coordinate
   Nyquist grid resolution is set independently, by that coordinate's own frequency
-  range: `4 r_j L + 1` points in pre-parity form, spanning the *full* length-2 native
-  domain per coordinate (not a length-1 half-domain — see FR-020, which requires the
-  full domain specifically so the parity result is independently checked rather than
-  assumed). Parity relabeling (§6.2) is a labeling step applied to already-computed
-  coefficients after the FFT; it is never an input to grid size or FFT dimension.
+  range: `4 r_j L + 1` points in pre-parity form, spanning the *full* length-`2/coefficient`
+  native domain per coordinate (not a length-1 half-domain — see FR-020, which
+  requires the full domain specifically so the parity result is independently
+  checked rather than assumed; and not a fixed length-2 domain regardless of
+  `coefficient` — see FR-022, added after audit found a fixed domain silently
+  aliases any non-unit coefficient). Parity relabeling (§6.2) is a labeling step
+  applied to already-computed coefficients after the FFT; it is never an input to
+  grid size or FFT dimension.
+- **Audit finding (2026-08-20)**: the original version of this spec did not require
+  `coefficient` uniformity across a parameter's terms, and the oracle sampled a
+  fixed length-2 domain regardless of `coefficient`. Both were latent defects —
+  every validation case in this spec used `coefficient = 1.0`, so neither gap was
+  exercised until an audit ahead of Spec 2 (Encodings layer) tested a non-unit
+  value directly against an independent, finer-grid ground truth and found aliasing.
+  FR-007, FR-022, SC-010, and SC-011 record the fix; see Spec 2's spec.md for why
+  this matters there (the Trotter frontend's coefficients are essentially never 1).
 - "Two-upload case" means a single parameter whose associated frequency is generated by
   two uploads (encoding repetitions) of that parameter, the smallest case beyond
   single-upload that can expose upload-count-dependent bugs.
