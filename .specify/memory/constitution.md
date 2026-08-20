@@ -47,6 +47,10 @@ and is listed in one in-repo extension register with its validation status.
 **2.4** Where faithful is slower than approximate, faithful ships. Approximations exist
 only as named non-default alternatives with documented error.
 
+**2.5** Source verification (§2.2) is performed against the documents in
+`docs/references/`. Cite file and section. A claim about a source that could have been
+verified there and was not is a defect, not a permitted "unverified" marker.
+
 ---
 
 ## 3. Measurement-only production path
