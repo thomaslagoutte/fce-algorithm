@@ -1,0 +1,177 @@
+"""Dedicated Hadamard-test equivalence tests for the Extract Layer — FR-003,
+FR-006, FR-010 (research.md R2, R3, R4).
+
+R3 (exact-limit oracle match), R4 (conjugate symmetry on the estimator's OWN
+output), and the fixture's own non-degeneracy are each their own test
+function, per explicit instruction — never merged into one generic "matches
+oracle" check.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+from qiskit.circuit.library import SGate, TGate
+from qiskit.quantum_info import SparsePauliOp, Statevector
+
+from fourierlearn.circuits import compile_observable_circuit
+from fourierlearn.encodings.pauli_pqc import PauliUpload, build_ir
+from fourierlearn.extract import _hadamard_test_circuit, estimate_coefficient
+from fourierlearn.ir import FixedGate, PauliEncodedCircuitIR
+from fourierlearn.reference import coefficients as oracle_coefficients
+
+_NONTRIVIAL = 1e-2
+
+
+def _mandated_fixture_ir() -> PauliEncodedCircuitIR:
+    """Spec 3 research.md R8's own construction, reused unchanged per FR-010
+    -- NOT re-derived or re-searched for this spec: three untied uploads of
+    the same parameter (X, X, Z), a fixed S gate after the first, a fixed T
+    gate after the second, observable X."""
+    u1 = build_ir(1, [PauliUpload("X", (0,), "alpha", 0, 1.0)], SparsePauliOp("Z")).gates
+    u2 = build_ir(1, [PauliUpload("X", (0,), "alpha", 1, 1.0)], SparsePauliOp("Z")).gates
+    u3 = build_ir(1, [PauliUpload("Z", (0,), "alpha", 2, 1.0)], SparsePauliOp("Z")).gates
+    gates = u1 + (FixedGate(SGate(), (0,)),) + u2 + (FixedGate(TGate(), (0,)),) + u3
+    return PauliEncodedCircuitIR(num_qubits=1, gates=gates, observable=SparsePauliOp("X"))
+
+
+def _exact_p0_minus_p1(circuit, frequency, part) -> float:
+    """Research/test-only exact evaluation via Statevector -- never used in
+    extract.py's own production path, which uses only AerSimulator.run() +
+    get_counts()."""
+    qc = _hadamard_test_circuit(circuit, frequency, part)
+    state = Statevector(qc)
+    probs = state.probabilities_dict()
+    p0 = sum(p for bitstr, p in probs.items() if bitstr[-1] == "0")
+    p1 = sum(p for bitstr, p in probs.items() if bitstr[-1] == "1")
+    return p0 - p1
+
+
+def _exact_estimate(circuit, frequency) -> complex:
+    return complex(
+        _exact_p0_minus_p1(circuit, frequency, "real"),
+        _exact_p0_minus_p1(circuit, frequency, "imag"),
+    )
+
+
+def test_hadamard_test_exact_limit_matches_oracle() -> None:
+    """research.md R3: the exact (infinite-shot-limit) Hadamard-test
+    construction, evaluated via Statevector (research/test-only), must match
+    fourierlearn.reference.coefficients()'s own exact value for every
+    representable frequency of the mandated fixture, to within 1e-9."""
+    ir = _mandated_fixture_ir()
+    observable = SparsePauliOp("X")
+    circuit = compile_observable_circuit(ir, observable)
+    expected = oracle_coefficients(ir)
+
+    freq_width = len(circuit.qregs[0])
+    low, high = -(2 ** (freq_width - 1)), 2 ** (freq_width - 1) - 1
+    checked_any = False
+    for l in range(low, high + 1):
+        exp = expected.get((l,))
+        if exp is None:
+            continue
+        got = _exact_estimate(circuit, (l,))
+        assert math.isclose(got.real, exp.real, abs_tol=1e-9), (l, got, exp)
+        assert math.isclose(got.imag, exp.imag, abs_tol=1e-9), (l, got, exp)
+        checked_any = True
+    assert checked_any
+
+
+def test_hadamard_test_conjugate_symmetry_on_own_output() -> None:
+    """research.md R4 (the specific check /speckit-clarify mandated before
+    FR-006's shortcut may be relied upon): the ESTIMATOR's own raw output at
+    +l and its own raw output at the register-decoded -l must be exact
+    complex conjugates of EACH OTHER -- not a comparison against the
+    oracle's b_{-l} value (that is T003's job), but the estimator's two
+    outputs compared directly."""
+    ir = _mandated_fixture_ir()
+    observable = SparsePauliOp("X")
+    circuit = compile_observable_circuit(ir, observable)
+    freq_width = len(circuit.qregs[0])
+    high = 2 ** (freq_width - 1) - 1
+
+    checked_any = False
+    for l in range(1, high + 1):
+        est_plus = _exact_estimate(circuit, (l,))
+        est_minus = _exact_estimate(circuit, (-l,))
+        assert math.isclose(est_minus.real, est_plus.real, abs_tol=1e-9), (l, est_plus, est_minus)
+        assert math.isclose(est_minus.imag, -est_plus.imag, abs_tol=1e-9), (l, est_plus, est_minus)
+        checked_any = True
+    assert checked_any
+
+
+def test_mandated_fixture_is_genuinely_complex_in_this_suite() -> None:
+    """Guardrail: independently re-confirm, in THIS spec's own suite (not by
+    trusting Spec 3's memory alone), that the mandated fixture still
+    produces at least one non-DC coefficient with both real and imaginary
+    parts individually above a non-triviality threshold -- proving the
+    reused fixture has not silently degraded to a real-only case in this
+    new context."""
+    ir = _mandated_fixture_ir()
+    expected = oracle_coefficients(ir)
+
+    found_complex = False
+    for (l,), value in expected.items():
+        if l == 0:
+            continue
+        if abs(value.real) > _NONTRIVIAL and abs(value.imag) > _NONTRIVIAL:
+            found_complex = True
+            break
+    assert found_complex, "mandated fixture must remain genuinely complex in this suite"
+
+
+def test_estimate_coefficient_returns_estimate_and_shot_count() -> None:
+    """Acceptance Scenario 1: returns a complex estimate together with the
+    exact shot count used."""
+    ir = _mandated_fixture_ir()
+    circuit = compile_observable_circuit(ir, SparsePauliOp("X"))
+    estimate, shots_used = estimate_coefficient(circuit, (4,), shots=50_000, seed=1)
+    assert isinstance(estimate, complex)
+    assert shots_used == 50_000
+
+
+def test_estimate_coefficient_larger_shots_not_less_accurate() -> None:
+    """Acceptance Scenario 2: a much larger shot count is no less accurate
+    against the oracle than a smaller one."""
+    ir = _mandated_fixture_ir()
+    circuit = compile_observable_circuit(ir, SparsePauliOp("X"))
+    expected = oracle_coefficients(ir)[(4,)]
+
+    small_estimate, _ = estimate_coefficient(circuit, (4,), shots=200, seed=2)
+    large_estimate, _ = estimate_coefficient(circuit, (4,), shots=500_000, seed=2)
+
+    small_err = abs(small_estimate - expected)
+    large_err = abs(large_estimate - expected)
+    # Allow generous slack: this is a statistical, not deterministic,
+    # comparison, but 2500x more shots must not leave the estimate *worse*
+    # by more than a wide margin consistent with 1/sqrt(shots) scaling.
+    assert large_err < small_err + 0.05
+
+
+@pytest.mark.parametrize("bad_shots", [0, -1, -100])
+def test_estimate_coefficient_rejects_nonpositive_shots(bad_shots: int) -> None:
+    """Acceptance Scenario 3: a shot count of zero or negative raises."""
+    ir = _mandated_fixture_ir()
+    circuit = compile_observable_circuit(ir, SparsePauliOp("X"))
+    with pytest.raises(ValueError):
+        estimate_coefficient(circuit, (4,), shots=bad_shots, seed=1)
+
+
+def test_estimate_coefficient_seed_independent_tolerance() -> None:
+    """Acceptance Scenario 4: two runs with the same shot count but
+    different seeds both pass the same Hoeffding-derived tolerance
+    (research.md R6) -- the tolerance is not tuned to one particular seed."""
+    ir = _mandated_fixture_ir()
+    circuit = compile_observable_circuit(ir, SparsePauliOp("X"))
+    expected = oracle_coefficients(ir)[(4,)]
+
+    shots = 200_000
+    delta = 0.01
+    eps = math.sqrt(2 * math.log(2 / delta) / shots)
+
+    for seed in (11, 22, 33):
+        estimate, _ = estimate_coefficient(circuit, (4,), shots=shots, seed=seed)
+        assert abs(estimate.real - expected.real) < eps
+        assert abs(estimate.imag - expected.imag) < eps
