@@ -16,6 +16,9 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+import numpy as np
+import numpy.typing as npt
+
 from fourierlearn.ir import PauliEncodedCircuitIR
 
 FourierCoefficients = dict[tuple[int, ...], complex]
@@ -52,4 +55,29 @@ class Oracle(Protocol):
     def coefficients(self, circuit: PauliEncodedCircuitIR) -> FourierCoefficients:
         """Return every Fourier coefficient this implementation computes, keyed by
         integer frequency tuple `l` (pre-parity, per frequency.py's convention)."""
+        ...
+
+
+@runtime_checkable
+class RegressionBackend(Protocol):
+    """The Extract -> Learn boundary (Spec 5, Learning Backend Layer): maps a
+    real-valued Fourier sensing matrix and its measured labels to a fitted
+    real-stacked coefficient vector.
+
+    `fit` MUST accept exactly `(A, y)` — no third parameter of any kind. This
+    is a structural, not merely conventional, guarantee: it makes it
+    impossible for a concrete backend's regularization-penalty selection to
+    ever receive `shots`, `tau`, or `r` as an input, closing the historical
+    "$t^2$-penalty bug" (penalty anchored to the shot-noise bound or
+    Trotter evolution time) at the interface level, not just by review
+    discipline. A concrete `RegressionBackend` is free to take any
+    constructor arguments it needs (e.g. a penalty grid, a cross-validation
+    fold count, a random seed) — those are not part of this Protocol, since
+    "interchangeable by configuration" (§9.2, §9.4) means this module never
+    inspects them.
+    """
+
+    def fit(self, A: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Return the fitted real-stacked coefficient vector `x` solving the
+        (generally under-determined) linear system `y = A @ x`."""
         ...
