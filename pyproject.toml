@@ -11,6 +11,7 @@ dependencies = [
     "qiskit==2.3.1",
     "qiskit-aer==0.17.2",
     "numpy==1.26.4",
+    "scikit-learn==1.8.0",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,14 @@ files = ["src/fourierlearn"]
 
 [[tool.mypy.overrides]]
 module = "qiskit.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "qiskit_aer.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sklearn.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
