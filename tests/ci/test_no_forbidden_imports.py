@@ -1,6 +1,7 @@
 """FR-014, FR-015: CI fails the build if any production module imports
 `Statevector`, `Operator`, `expm`, or `fourierlearn.reference` — except
-`reference.py` itself.
+`reference.py` itself, and (Spec 6 FR-011/FR-012) `_exact_dynamics.py`,
+which is exempt from the `reference` prohibition only.
 
 The scanner is AST-based (never executes or imports the scanned code), so it can
 never accidentally trip its own prohibition.
@@ -15,6 +16,23 @@ from pathlib import Path
 FORBIDDEN_NAMES = {"Statevector", "Operator", "expm"}
 _SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "fourierlearn"
 _EXEMPT_MODULE = "reference.py"
+
+# Constitution Clarifications (Spec 6, 2026-08-21): the generalization-check
+# mechanism (Constitution §8.2) must compare a fitted model's prediction
+# against genuinely EXACT ground-truth dynamics -- never a finite-shot
+# measurement or a finer-Trotter approximation, because neither can
+# distinguish a real capability from an artifact of interpolating
+# imperfect training labels (verified computationally: specs/006-experiment-
+# models-layer/research.md R1 constructs a genuine overfitting artifact via
+# null-space injection and confirms the check only correctly returns
+# "refuted" when compared against the true oracle, not an approximation).
+# This is the ONE other module in the whole project narrowly authorized to
+# import `fourierlearn.reference`, and ONLY for that one purpose: it is NOT
+# exempted from the Statevector/Operator/expm prohibition, since it has no
+# legitimate reason to import those directly -- it only calls reference.py's
+# own already-exempted function. The exemption list is widened from one
+# module to two, each independently justified, not opened generally.
+_NARROWLY_EXEMPT_FROM_REFERENCE_ONLY = "_exact_dynamics.py"
 
 
 def _scan_module(path: Path) -> set[str]:
@@ -43,14 +61,27 @@ def _scan_module(path: Path) -> set[str]:
     return found
 
 
-def find_violations(src_root: Path, exempt_module: str = _EXEMPT_MODULE) -> dict[str, set[str]]:
-    """Scan every *.py file under `src_root`, excluding `exempt_module`, and return
-    {relative_path: forbidden_names_found} for any file with a violation."""
+def find_violations(
+    src_root: Path,
+    exempt_module: str = _EXEMPT_MODULE,
+    narrow_exempt_module: str = _NARROWLY_EXEMPT_FROM_REFERENCE_ONLY,
+) -> dict[str, set[str]]:
+    """Scan every *.py file under `src_root`, excluding `exempt_module` entirely
+    and waiving only the `reference` finding for `narrow_exempt_module` (Spec 6
+    FR-011/FR-012 -- that module may still be flagged for
+    Statevector/Operator/expm), and return {relative_path: forbidden_names_found}
+    for any file with a remaining violation.
+
+    `narrow_exempt_module` has a safe default (`_NARROWLY_EXEMPT_FROM_REFERENCE_ONLY`)
+    so every pre-existing call site (positional or `exempt_module=`-only keyword)
+    continues to behave exactly as before this parameter was added."""
     violations: dict[str, set[str]] = {}
     for path in sorted(src_root.rglob("*.py")):
         if path.name == exempt_module:
             continue
         found = _scan_module(path)
+        if path.name == narrow_exempt_module:
+            found = found - {"reference"}
         if found:
             violations[str(path.relative_to(src_root))] = found
     return violations
@@ -112,3 +143,41 @@ def test_guard_fires_on_each_of_the_four_forbidden_symbols(tmp_path: Path) -> No
     assert violations["expm_case.py"] == {"expm"}
     assert violations["reference_case.py"] == {"reference"}
     assert violations["reference_from_case.py"] == {"reference"}
+
+
+# --- Spec 6 FR-011/FR-012: the narrow, explicitly justified exemption for
+# `_exact_dynamics.py` (generalization check) ------------------------------------
+
+
+def test_narrow_exemption_does_not_widen_to_other_modules(tmp_path: Path) -> None:
+    """A module named anything other than `_exact_dynamics.py` that imports
+    `fourierlearn.reference` MUST still be rejected -- proving the exemption
+    is narrow, not a general widening of the rule."""
+    (tmp_path / "some_other_experiment_module.py").write_text(
+        "from fourierlearn import reference\n"
+    )
+    violations = find_violations(tmp_path, exempt_module=_EXEMPT_MODULE)
+    assert violations["some_other_experiment_module.py"] == {"reference"}
+
+
+def test_narrow_exemption_still_rejects_statevector_and_operator(tmp_path: Path) -> None:
+    """The narrowly-exempt module itself is waived for `reference` only --
+    it MUST still be flagged if it also imports Statevector/Operator/expm
+    directly, since it has no legitimate reason to (it only calls
+    reference.py's own already-exempted function)."""
+    (tmp_path / _NARROWLY_EXEMPT_FROM_REFERENCE_ONLY).write_text(
+        "from fourierlearn import reference\n"
+        "from qiskit.quantum_info import Statevector\n"
+    )
+    violations = find_violations(tmp_path, exempt_module=_EXEMPT_MODULE)
+    assert violations[_NARROWLY_EXEMPT_FROM_REFERENCE_ONLY] == {"Statevector"}
+
+
+def test_narrow_exemption_waives_only_reference_for_the_named_module(tmp_path: Path) -> None:
+    """Sanity check: the named module importing ONLY `reference` (its sole
+    authorized use) produces zero violations."""
+    (tmp_path / _NARROWLY_EXEMPT_FROM_REFERENCE_ONLY).write_text(
+        "from fourierlearn import reference\n"
+    )
+    violations = find_violations(tmp_path, exempt_module=_EXEMPT_MODULE)
+    assert _NARROWLY_EXEMPT_FROM_REFERENCE_ONLY not in violations
