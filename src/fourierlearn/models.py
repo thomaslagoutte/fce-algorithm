@@ -15,7 +15,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from qiskit.quantum_info import SparsePauliOp
+
+from fourierlearn.encodings.pauli_pqc import _pad_to_full_width_little_endian
 from fourierlearn.encodings.trotter import CouplingGroup, CouplingGroupTerm
+from fourierlearn.symmetry import verify_symmetry
 
 _DEFAULT_EDGE_LABEL = "__default_zz_coupling__"
 _DEFAULT_FIELD_LABEL = "__default_x_field__"
@@ -46,23 +50,79 @@ class TFIMGraph:
 
 @dataclass(frozen=True)
 class SymmetryDeclaration:
-    """Constitution §11 attach point (FR-007, User Story 3): inert data
-    naming a symmetry a future spec's §11.1 equivariance check would
-    evaluate. Never evaluated by this feature."""
+    """Constitution §11 attach point (Spec 6 FR-007; Spec 7 FR-012 adds
+    `generators`): `name`/`description` are inert metadata; `generators`
+    (new, additive, defaulted to `()`) is the actual algebraic content —
+    one or more full-qubit-width `SparsePauliOp` operators, in the same
+    little-endian qubit indexing `PhysicalModelDescription.__post_init__`
+    uses for its own flattened Hamiltonian terms — that Spec 7's
+    `fourierlearn.symmetry.verify_symmetry` checks against Constitution
+    §11.1. A declaration with no `generators` is carried through exactly
+    as Spec 6 shipped it: never evaluated, never checked."""
 
     name: str
     description: str = ""
+    generators: tuple[SparsePauliOp, ...] = ()
+
+
+def _flatten_hamiltonian_terms(
+    coupling_groups: tuple[CouplingGroup, ...], num_sites: int
+) -> tuple[SparsePauliOp, ...]:
+    """Flatten every declared `CouplingGroupTerm` into a full-`num_sites`-
+    qubit `SparsePauliOp`, reusing `pauli_pqc`'s own
+    `_pad_to_full_width_little_endian` helper (Constitution §9.4) — the
+    exact same little-endian padding convention this project already uses
+    everywhere else a `PauliTerm`/`CouplingGroupTerm`'s own left-to-right
+    `pauli[i]` acts on `qubits[i]` and must be reconciled with Qiskit's
+    little-endian `SparsePauliOp` label convention (rightmost character =
+    qubit 0). Getting this wrong would silently place a term's Pauli
+    letters on the wrong physical qubits whenever a term does not already
+    span every qubit symmetrically."""
+    terms = []
+    for group in coupling_groups:
+        for term in group.terms:
+            label = _pad_to_full_width_little_endian(term.pauli, term.qubits, num_sites)
+            terms.append(SparsePauliOp(label))
+    return tuple(terms)
 
 
 @dataclass(frozen=True)
 class PhysicalModelDescription:
     """FR-005's output: the `CouplingGroup`s Spec 2's encodings layer
     already accepts, plus the number of sites (qubits) and the optional
-    §11 attach point."""
+    §11 attach point.
+
+    **Structural enforcement (Spec 7 FR-010, Guardrail #2)**: if
+    `symmetry` carries any `generators`, `__post_init__` verifies them
+    against this model's own (flattened) Hamiltonian terms immediately,
+    unconditionally — this makes verification automatic for *every* code
+    path that ever produces a `PhysicalModelDescription`, including direct
+    instantiation, not only `build_tfim_model`'s own call site. No field
+    is assigned or mutated here — this frozen dataclass's `__post_init__`
+    only validates.
+    """
 
     num_sites: int
     coupling_groups: tuple[CouplingGroup, ...]
     symmetry: SymmetryDeclaration | None = None
+
+    def __post_init__(self) -> None:
+        if self.symmetry is not None and self.symmetry.generators:
+            hamiltonian_terms = _flatten_hamiltonian_terms(self.coupling_groups, self.num_sites)
+            result = verify_symmetry(self.symmetry.generators, hamiltonian_terms)
+            if not result.accepted:
+                raise InvalidSymmetryError(
+                    f"symmetry declaration {self.symmetry.name!r} failed §11.1 check(s): "
+                    f"{result.failure_reason}"
+                )
+
+
+class InvalidSymmetryError(ValueError):
+    """Raised by `PhysicalModelDescription.__post_init__` when an attached
+    symmetry declaration fails any of Constitution §11.1's three
+    conditions (FR-010) — before any circuit-compilation module is ever
+    reached, since constructing this object is the earliest point any
+    caller can reach with a symmetry-carrying model at all."""
 
 
 class ZeroCouplingError(ValueError):
