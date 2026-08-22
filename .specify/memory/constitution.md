@@ -23,7 +23,7 @@ Never, regardless of instruction, benchmark, or apparent benefit:
 4. Train on labels produced by the same approximation as the feature map.
 5. Reduce the extracted frequency set below what the spec requires.
 6. Restrict extraction to a sublattice whose containment has not been empirically verified
-   (§12.6).
+   (§11.6).
 7. Wrap a circuit block beyond a few qubits in `.control()`.
 8. Assert what a source says without verifying it in-session.
 

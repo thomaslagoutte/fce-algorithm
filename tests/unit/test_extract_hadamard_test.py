@@ -5,6 +5,14 @@ R3 (exact-limit oracle match), R4 (conjugate symmetry on the estimator's OWN
 output), and the fixture's own non-degeneracy are each their own test
 function, per explicit instruction — never merged into one generic "matches
 oracle" check.
+
+Spec 11 T001: adds the Two-Tiered Equivalence Proof's Tier 1 (Construction
+Correctness, FR-012) -- a frozen, hand-copied reference of the PRE-REPAIR
+`.control()`-based construction (`_pre_repair_hadamard_test_circuit`,
+`_pre_repair_v_l_dagger_circuit` below) is kept permanently in this file so
+the equivalence claim against the now-repaired, inline-assembled
+`fourierlearn.extract._hadamard_test_circuit` remains checkable forever,
+independent of what production code looks like today (Constitution §5.2).
 """
 
 from __future__ import annotations
@@ -12,16 +20,157 @@ from __future__ import annotations
 import math
 
 import pytest
+from qiskit import QuantumCircuit, QuantumRegister
 from qiskit.circuit.library import SGate, TGate
-from qiskit.quantum_info import SparsePauliOp, Statevector
+from qiskit.quantum_info import Operator, SparsePauliOp, Statevector
 
-from fourierlearn.circuits import compile_observable_circuit
+from fourierlearn.circuits import _increment_circuit, compile_observable_circuit
 from fourierlearn.encodings.pauli_pqc import PauliUpload, build_ir
 from fourierlearn.extract import _hadamard_test_circuit, estimate_coefficient
 from fourierlearn.ir import FixedGate, PauliEncodedCircuitIR
 from fourierlearn.reference import coefficients as oracle_coefficients
 
 _NONTRIVIAL = 1e-2
+_VALID_PARTS = ("real", "imag")
+
+
+def _pre_repair_v_l_dagger_circuit(component: int, width: int) -> QuantumCircuit:
+    """Frozen, byte-for-byte copy of `extract._v_l_dagger_circuit` as it
+    existed before Spec 11's repair -- this function's OWN internal logic
+    never changes (only how it gets controlled does), kept here only so
+    `_pre_repair_hadamard_test_circuit` below is fully self-contained."""
+    qc = QuantumCircuit(width)
+    step = _increment_circuit(width).inverse() if component >= 0 else _increment_circuit(width)
+    for _ in range(abs(component)):
+        qc.compose(step, inplace=True)
+    return qc
+
+
+def _pre_repair_hadamard_test_circuit(circuit: QuantumCircuit, frequency: tuple[int, ...], part: str) -> QuantumCircuit:
+    """Frozen, byte-for-byte copy of `extract._hadamard_test_circuit` as it
+    existed before Spec 11's repair (Constitution §1.7 violation: wraps each
+    of the `A(U,O)` block and the `V_l^dagger` block in a single whole-block
+    `.control(1)` call). Permanently retained as Tier 1's own reference
+    construction -- never itself repaired."""
+    if part not in _VALID_PARTS:
+        raise ValueError(f"part must be one of {_VALID_PARTS}, got {part!r}")
+    freq_registers = circuit.qregs[:-2]
+    if len(frequency) != len(freq_registers):
+        raise ValueError(
+            f"frequency has {len(frequency)} components, but the compiled circuit has "
+            f"{len(freq_registers)} frequency register(s)"
+        )
+    for component, freq_reg in zip(frequency, freq_registers):
+        width = len(freq_reg)
+        low, high = -(2 ** (width - 1)), 2 ** (width - 1) - 1
+        if not (low <= component <= high):
+            raise ValueError(
+                f"frequency component {component} is not representable by a "
+                f"{width}-qubit register (valid range [{low}, {high}])"
+            )
+
+    had_anc = QuantumRegister(1, "had_anc")
+    qc = QuantumCircuit(had_anc, *circuit.qregs)
+    qc.h(had_anc[0])
+    qc.append(
+        circuit.to_gate(label="A(U,O)").control(1),
+        [had_anc[0]] + qc.qubits[1 : 1 + circuit.num_qubits],
+    )
+    for component, freq_reg in zip(frequency, freq_registers):
+        v_gate = _pre_repair_v_l_dagger_circuit(component, len(freq_reg)).to_gate(label="Vl_dag").control(1)
+        qc.append(v_gate, [had_anc[0]] + list(freq_reg))
+    if part == "imag":
+        qc.sdg(had_anc[0])
+    qc.h(had_anc[0])
+    return qc
+
+
+def _minimal_two_qubit_two_parameter_ir() -> PauliEncodedCircuitIR:
+    """research.md R3's own minimal 2-qubit/2-parameter fixture --
+    deliberately minimal multiplicities (r_j=1, upload_count=1 each,
+    `register_width(1,1)=3` per parameter) to stay genuinely small: an
+    EARLIER, richer 2-qubit/2-TIED-parameter attempt (second upload
+    coefficient=0.5) was found INTRACTABLE for a full `Operator()` at the
+    pre-repair construction (research.md R3's own executed, honest negative
+    finding) -- this is why Tier 1 uses this minimal fixture, not that one."""
+    return build_ir(
+        2,
+        [
+            PauliUpload("XI", (0, 1), "a", 0, 1.0),
+            PauliUpload("IZ", (0, 1), "b", 0, 1.0),
+        ],
+        SparsePauliOp("ZI"),
+    )
+
+
+def _sample_frequency_axis(width: int) -> list[int]:
+    """research.md R3's own representative sample per frequency axis (min,
+    `0`, max, and one interior value) -- not an exhaustive sweep, which is
+    Tier 2's job at actual baseline scale, not Tier 1's at small scale."""
+    low, high = -(2 ** (width - 1)), 2 ** (width - 1) - 1
+    values = {low, 0, high}
+    if high - low > 2:
+        values.add(low + 1)
+    return sorted(values)
+
+
+def test_tier1_operator_equiv_mandated_fixture() -> None:
+    """FR-012 (Tier 1, Construction Correctness): the pre-repair reference
+    construction and the current (post-repair) `_hadamard_test_circuit`
+    compute the IDENTICAL operator on the mandated fixture, for a
+    representative sample of frequencies and both real/imag parts."""
+    ir = _mandated_fixture_ir()
+    circuit = compile_observable_circuit(ir, SparsePauliOp("X"))
+    freq_width = len(circuit.qregs[0])
+
+    checked_any = False
+    for component in _sample_frequency_axis(freq_width):
+        for part in _VALID_PARTS:
+            old = _pre_repair_hadamard_test_circuit(circuit, (component,), part)
+            new = _hadamard_test_circuit(circuit, (component,), part)
+            assert Operator(old).equiv(Operator(new)), (component, part)
+            checked_any = True
+    assert checked_any
+
+
+def test_tier1_operator_equiv_minimal_two_qubit_fixture() -> None:
+    """FR-012 (Tier 1): the same proof, on the minimal 2-qubit/2-parameter
+    fixture (research.md R3) -- confirms the repair generalizes beyond a
+    1-qubit circuit register, not only the mandated fixture.
+
+    A HAND-PICKED, small sample of (frequency, part) combos, exactly
+    matching research.md R3's own executed set -- NOT an exhaustive
+    `itertools.product` over both sampled axes: even at this fixture's
+    minimal multiplicities, a full 2-axis cross product makes `Operator()`
+    reconstruction of the PRE-REPAIR (`.control()`-based) reference circuit
+    the dominant cost (research.md R3's own executed profiling: ~9-17s per
+    `Operator()` call at this fixture's 10-total-qubit scale) -- confirmed
+    in-session to make an exhaustive sweep here take tens of minutes, which
+    is disproportionate for Tier 1's own purpose (proving the inline-
+    assembly LOGIC has no baseline bug, not exhaustively covering every
+    frequency)."""
+    ir = _minimal_two_qubit_two_parameter_ir()
+    circuit = compile_observable_circuit(ir, SparsePauliOp("ZI"))
+
+    checked_any = False
+    for frequency, part in [((0, 0), "real"), ((0, 0), "imag"), ((1, -1), "real"), ((-1, 1), "imag")]:
+        old = _pre_repair_hadamard_test_circuit(circuit, frequency, part)
+        new = _hadamard_test_circuit(circuit, frequency, part)
+        assert Operator(old).equiv(Operator(new)), (frequency, part)
+        checked_any = True
+    assert checked_any
+
+
+def test_tier1_zero_frequency_component_empty_block_handled() -> None:
+    """Edge Case (spec.md): a target frequency component of exactly `0`
+    (an identity `V_l^dagger`, zero-gate block) must not error and must
+    still produce an operator-equivalent circuit."""
+    ir = _mandated_fixture_ir()
+    circuit = compile_observable_circuit(ir, SparsePauliOp("X"))
+    for part in _VALID_PARTS:
+        old = _pre_repair_hadamard_test_circuit(circuit, (0,), part)
+        new = _hadamard_test_circuit(circuit, (0,), part)
+        assert Operator(old).equiv(Operator(new))
 
 
 def _mandated_fixture_ir() -> PauliEncodedCircuitIR:

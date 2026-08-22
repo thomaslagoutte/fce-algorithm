@@ -103,7 +103,18 @@ def _build_grid(circuit: PauliEncodedCircuitIR) -> list[npt.NDArray[np.float64]]
 def _build_circuit(circuit: PauliEncodedCircuitIR) -> QuantumCircuit:
     """One QuantumCircuit built from the IR's gate sequence, using
     `ir.parameter_symbols()` — never a fresh Parameter per term — so every term
-    sharing a parameter_index binds to the identical symbol (FR-005)."""
+    sharing a parameter_index binds to the identical symbol (FR-005).
+
+    Drift protection: `fourierlearn.learn._plain_forward_circuit` builds the
+    exact same circuit from the exact same loop, but is defined
+    independently there rather than importing this function, because Spec
+    1's CI import guard (`tests/ci/test_no_forbidden_imports.py`) forbids
+    every production module except this one from importing
+    `fourierlearn.reference`. If this loop's logic ever changes, update
+    `_plain_forward_circuit` to match — the two are not enforced identical
+    by any shared code path, only by this comment and by the two modules'
+    own respective test suites.
+    """
     symbols = circuit.parameter_symbols()
     qc = QuantumCircuit(circuit.num_qubits)
     for gate in circuit.gates:
@@ -169,3 +180,121 @@ def coefficients(
     _check_budget(circuit, budget, confirm)
     values = _evaluate_grid(circuit)
     return _fft_and_index(values)
+
+
+# --- 6. Spec 9 deliverable (b): the U(x)U* projector oracle ----------------------
+#
+# `compile_projector_circuit` (circuits.py) builds two independent copies of
+# the SAME encoding circuit's frequency-counting apparatus (one for `U`, one
+# for the conjugate `U*`) — there is no single "the IR's frequency register"
+# for this construction; there are two, one per copy. This section gives the
+# oracle a way to compute the EXACT ground truth for what that two-copy
+# circuit is meant to extract: the Fourier coefficients of the projector
+# `f(alpha) = |<0|U(alpha)|0>|^2`.
+#
+# Architect-caught correction, verified in-session before being implemented
+# (a random 2-tie-group, 1-qubit fixture; three-way comparison against an
+# independent grid+DFT of |<0|U(alpha)|0>|^2 itself): combining the two
+# copies' decoded frequencies by SUMMING them (Omega = omega_1 + omega_2) is
+# WRONG (max error 0.25 against ground truth on that fixture); the correct
+# combination is the per-axis DIFFERENCE, Omega = omega_1 - omega_2 (max
+# error 1.1e-16). This matches the underlying math directly: writing
+# `<0|U(alpha)|0> = sum_l a_l * e^{i l.alpha}`, its complex conjugate is
+# `sum_l conj(a_l) * e^{-i l.alpha}`, so the product
+# `f(alpha) = <0|U|0> * conj(<0|U|0>)` has its `e^{i m.alpha}` coefficient at
+# `m = l1 - l2`, not `l1 + l2`.
+
+
+def _evaluate_grid_amplitude(circuit: PauliEncodedCircuitIR) -> npt.NDArray[np.complex128]:
+    """Like `_evaluate_grid`, but reads out the raw amplitude of the
+    all-zeros computational basis state, `<0|U(alpha)|0>`, instead of an
+    observable's expectation value — the quantity `amplitude_coefficients`
+    needs, and `coefficients` does not (it is hardcoded to
+    `circuit.observable`'s own expectation value). Still only
+    `Statevector`, never `Operator`/`expm` (research.md R6)."""
+    parameters = circuit.parameters()
+    symbols = circuit.parameter_symbols()
+    qc = _build_circuit(circuit)
+    axes = _build_grid(circuit)
+    shape = tuple(len(axis) for axis in axes)
+
+    values = np.zeros(shape, dtype=complex)
+    for index in itertools.product(*(range(n) for n in shape)):
+        binding = {
+            symbols[p.index]: axes[axis_i][index[axis_i]]
+            for axis_i, p in enumerate(parameters)
+        }
+        bound = qc.assign_parameters(binding)
+        state = Statevector.from_instruction(bound)
+        values[index] = state.data[0]
+    return values
+
+
+def amplitude_coefficients(
+    circuit: PauliEncodedCircuitIR,
+    budget: int = DEFAULT_BUDGET,
+    confirm: bool = False,
+) -> dict[tuple[int, ...], complex]:
+    """The Fourier coefficients of `<0|U(alpha)|0>` itself (never an
+    observable's expectation value) — `a_l` in `<0|U(alpha)|0> = sum_l a_l
+    e^{i l.alpha}`. Composes the same cost-budget guard and grid
+    construction `coefficients` uses, with `_evaluate_grid_amplitude`
+    (raw amplitude) in place of `_evaluate_grid` (observable expectation)."""
+    _check_budget(circuit, budget, confirm)
+    values = _evaluate_grid_amplitude(circuit)
+    return _fft_and_index(values)
+
+
+def projector_coefficients(
+    circuit: PauliEncodedCircuitIR,
+    budget: int = DEFAULT_BUDGET,
+    confirm: bool = False,
+) -> dict[tuple[int, ...], complex]:
+    """The exact ground truth for the `U⊗U*` projector construction
+    (Spec 9 deliverable b, eq. 5.52): the Fourier coefficients of
+    `f(alpha) = |<0|U(alpha)|0>|^2`. Computes `a_l` once via
+    `amplitude_coefficients` (reused, not recomputed per pair), then
+    combines every pair `(l1, l2)` via the verified per-axis DIFFERENCE
+    rule `m = l1 - l2` (see module note above) — `Omega = omega_1 -
+    omega_2`, never `omega_1 + omega_2`."""
+    amplitudes = amplitude_coefficients(circuit, budget=budget, confirm=confirm)
+    result: dict[tuple[int, ...], complex] = {}
+    for l1, a1 in amplitudes.items():
+        for l2, a2 in amplitudes.items():
+            m = tuple(c1 - c2 for c1, c2 in zip(l1, l2))
+            result[m] = result.get(m, 0j) + a1 * a2.conjugate()
+    return result
+
+
+# --- 7. Spec 10 deliverable (a): the kernel-overlap oracle -----------------
+#
+# `compile_kernel_overlap_circuit` (circuits.py) extracts
+# `Re(<b(x)|b(x')>)` via a selector-qubit Hadamard-test construction on the
+# actual compiled circuit. This function computes the same quantity
+# independently, by classical inner product over each side's own
+# `amplitude_coefficients` (never by inspecting the compiled circuit) — the
+# ground truth `compile_kernel_overlap_circuit`'s tests compare against.
+
+
+def kernel_overlap_oracle(
+    ir_x: PauliEncodedCircuitIR,
+    ir_x_prime: PauliEncodedCircuitIR,
+    budget: int = DEFAULT_BUDGET,
+    confirm: bool = False,
+) -> float:
+    """`Re(<b(x)|b(x')>) = Re(sum_l conj(a_l(x)) * a_l(x'))`, where `a_l(x)`
+    is `amplitude_coefficients(ir_x)` — the Fourier-coefficient feature
+    vector `b(x)` this feature's kernel is defined over (Constitution
+    §11.11: never a fidelity kernel over the encoded parameters `alpha`
+    themselves). Frequency keys present in only one side contribute an
+    implicit `0` amplitude on the other, exactly as a zero-padded feature
+    vector would."""
+    # Constitution §5.3: no caching, batching, or memoization -- each call
+    # recomputes both sides' amplitude coefficients from scratch.
+    a = amplitude_coefficients(ir_x, budget=budget, confirm=confirm)
+    b = amplitude_coefficients(ir_x_prime, budget=budget, confirm=confirm)
+    keys = set(a) | set(b)
+    total = 0j
+    for key in keys:
+        total += a.get(key, 0j).conjugate() * b.get(key, 0j)
+    return total.real
